@@ -130,6 +130,7 @@ class SelfdriveD:
       self.ignored_processes = {'loggerd', }
 
     # Determine startup event
+    self.startup_event = None
     if not car_recognized:
       self.startup_event = EventName.startupNoCar
     elif car_recognized and self.CP.passive:
