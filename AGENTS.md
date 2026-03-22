@@ -72,3 +72,30 @@ This fork is based on upstream's `master` branch and deviates in the following w
 - **Modifications (as of commit e35e528):**
   - **Engagement/Disengagement:** Events for engaging and disengaging have been disabled (`selfdrive/selfdrived/events.py`, `selfdrive/selfdrived/selfdrived.py`).
   - **Audio:** Maximum warning volume has been lowered.
+
+## 6. Workflow for This Fork (piercers/openpilot)
+
+**This repo is a personal fork of `commaai/openpilot` used exclusively for small, targeted code changes. The following rules override any general guidance above.**
+
+### Tests
+- **Do NOT run tests.** Tests are assumed to pass and will be verified manually.
+- Do not run `pytest`, `scons`, or any build/test commands as part of your workflow.
+- Do not suggest or add test files.
+
+### GitHub Actions / CI
+- **Do NOT trigger or rely on GitHub Actions.** No CI runs are expected or required.
+- Do not modify `.github/workflows/` files.
+
+### Remotes & PRs
+- **All pushes and PRs target this fork only** (`piercers/openpilot` on `origin`).
+- **Never push to or PR against the upstream** (`commaai/openpilot`).
+- The upstream remote (if configured as `upstream`) is read-only — used only for syncing the `master` branch.
+
+### Branch strategy
+- Work branches are cut from `master` (the fork's default branch, kept in sync with upstream).
+- PRs go: `feat/<branch>` → `master` on `piercers/openpilot`.
+- Keep changes small and focused — this repo exists for targeted modifications only.
+
+### Upstream sync
+- To pull in upstream changes: `git fetch upstream && git merge upstream/master`
+- Do not rebase or force-push `master`.
