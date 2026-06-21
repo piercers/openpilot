@@ -44,12 +44,6 @@ def unblock_stdout() -> None:
     exit_status = os.wait()[1] >> 8
     os._exit(exit_status)
 
-
-def write_onroad_params(started, params):
-  params.put_bool("IsOnroad", started)
-  params.put_bool("IsOffroad", not started)
-
-
 def save_bootlog():
   # copy current params
   tmp = tempfile.mkdtemp()

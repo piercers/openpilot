@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import itertools
 import json
 import os
 import queue
@@ -11,7 +12,6 @@ import random
 import select
 import socket
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
@@ -28,17 +28,17 @@ from websocket import (ABNF, WebSocket, WebSocketException, WebSocketTimeoutExce
                        create_connection)
 
 import cereal.messaging as messaging
-from cereal import log
+from cereal import car, log
 from cereal.services import SERVICE_LIST
 from openpilot.common.api import Api, get_key_pair
 from openpilot.common.utils import CallbackReader, get_upload_stream
 from openpilot.common.params import Params
 from openpilot.common.realtime import set_core_affinity
-from openpilot.system.hardware import HARDWARE, PC
+from openpilot.common.hardware import HARDWARE, PC
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.version import get_build_metadata
-from openpilot.system.hardware.hw import Paths
+from openpilot.common.version import get_build_metadata
+from openpilot.common.hardware.hw import Paths
 
 
 ATHENA_HOST = os.getenv('ATHENA_HOST', 'wss://athena.comma.ai')
@@ -55,6 +55,9 @@ MAX_AGE = 31 * 24 * 3600  # seconds
 WS_FRAME_SIZE = 4096
 DEVICE_STATE_UPDATE_INTERVAL = 1.0  # in seconds
 DEFAULT_UPLOAD_PRIORITY = 99  # higher number = lower priority
+
+SEND_PRIORITY_HIGH = 0
+SEND_PRIORITY_LOW = 1
 
 # https://bytesolutions.com/dscp-tos-cos-precedence-conversion-chart,
 # https://en.wikipedia.org/wiki/Differentiated_services
@@ -125,13 +128,17 @@ class UploadItem:
 
 dispatcher["echo"] = lambda s: s
 recv_queue: Queue[str] = queue.Queue()
-send_queue: Queue[str] = queue.Queue()
+send_queue: Queue[tuple[int, int, str]] = queue.PriorityQueue()
 upload_queue: Queue[UploadItem] = queue.PriorityQueue()
-low_priority_send_queue: Queue[str] = queue.Queue()
 log_recv_queue: Queue[str] = queue.Queue()
 cancelled_uploads: set[str] = set()
 
 cur_upload_items: dict[int, UploadItem | None] = {}
+
+send_seq = itertools.count()
+def send_queue_push(data: str, priority: int) -> None:
+  assert priority is not None, "send queue priority must be specified"
+  send_queue.put_nowait((priority, next(send_seq), data)) # tie-break with a monotonic counter
 
 
 def strip_zst_extension(fn: str) -> str:
@@ -161,7 +168,7 @@ class UploadQueueCache:
     try:
       queue: list[UploadItem | None] = list(upload_queue.queue)
       items = [asdict(i) for i in queue if i is not None and (i.id not in cancelled_uploads)]
-      Params().put("AthenadUploadQueue", items)
+      Params().put("AthenadUploadQueue", items, block=True)
     except Exception:
       cloudlog.exception("athena.UploadQueueCache.cache.exception")
 
@@ -178,7 +185,6 @@ def handle_long_poll(ws: WebSocket, exit_event: threading.Event | None) -> None:
     threading.Thread(target=upload_handler, args=(end_event,), name='upload_handler3'),
     threading.Thread(target=upload_handler, args=(end_event,), name='upload_handler4'),
     threading.Thread(target=log_handler, args=(end_event,), name='log_handler'),
-    threading.Thread(target=stat_handler, args=(end_event,), name='stat_handler'),
   ] + [
     threading.Thread(target=jsonrpc_handler, args=(end_event,), name=f'worker_{x}')
     for x in range(HANDLER_THREADS)
@@ -207,7 +213,7 @@ def jsonrpc_handler(end_event: threading.Event) -> None:
       if "method" in data:
         cloudlog.event("athena.jsonrpc_handler.call_method", data=data)
         response = JSONRPCResponseManager.handle(data, dispatcher)
-        send_queue.put_nowait(response.json)
+        send_queue_push(response.json, SEND_PRIORITY_HIGH)
       elif "id" in data and ("result" in data or "error" in data):
         log_recv_queue.put_nowait(data)
       else:
@@ -216,7 +222,7 @@ def jsonrpc_handler(end_event: threading.Event) -> None:
       pass
     except Exception as e:
       cloudlog.exception("athena jsonrpc handler failed")
-      send_queue.put_nowait(json.dumps({"error": str(e)}))
+      send_queue_push(json.dumps({"error": str(e)}), SEND_PRIORITY_HIGH)
 
 
 def retry_upload(tid: int, end_event: threading.Event, increase_count: bool = True) -> None:
@@ -477,7 +483,7 @@ def setRouteViewed(route: str) -> dict[str, int | str]:
   # remove duplicates
   routes = list(dict.fromkeys(routes))
 
-  params.put("AthenadRecentlyViewedRoutes", ",".join(routes[-10:]))
+  params.put("AthenadRecentlyViewedRoutes", ",".join(routes[-10:]), block=True)
   return {"success": 1}
 
 
@@ -536,6 +542,16 @@ def getSshAuthorizedKeys() -> str:
 def getGithubUsername() -> str:
   return cast(str, Params().get("GithubUsername") or "")
 
+
+@dispatcher.add_method
+def getNotCar() -> bool:
+  cp_bytes = Params().get("CarParamsPersistent")
+  if cp_bytes is not None:
+    with car.CarParams.from_bytes(cp_bytes) as CP:
+      return CP.notCar
+  return False
+
+
 @dispatcher.add_method
 def getSimInfo():
   return HARDWARE.get_sim_info()
@@ -553,8 +569,28 @@ def getNetworkMetered() -> bool:
 
 
 @dispatcher.add_method
-def getNetworks():
-  return HARDWARE.get_networks()
+def startStream(sdp: str, enabled: bool) -> dict:
+  from openpilot.system.webrtc.helpers import StreamRequestBody, post_stream_request, wait_for_webrtcd
+  params = Params()
+  bridge_services_in = []
+
+  # stale car params case taken care of by webrtcd being shut off on ignition
+  cp_bytes = Params().get("CarParamsPersistent")
+  if cp_bytes is not None:
+    with car.CarParams.from_bytes(cp_bytes) as CP:
+      if CP.notCar:
+        bridge_services_in.append("testJoystick")
+  else:
+      raise Exception("failed to get CarParamsPersistent")
+
+  if params.get_bool("IsOffroad"):
+    # manager owns camerad/stream_encoderd/webrtcd; flip the param and let it bring them up.
+    # webrtcd clears IsLiveStreaming when the session ends
+    params.put_bool("IsLiveStreaming", True)
+    # wait for webrtcd end points to wake up
+    wait_for_webrtcd()
+
+  return post_stream_request(StreamRequestBody(sdp, "wideRoad", enabled, bridge_services_in, ["carState", "deviceState"]))
 
 
 @dispatcher.add_method
@@ -626,7 +662,7 @@ def log_handler(end_event: threading.Event) -> None:
               "jsonrpc": "2.0",
               "id": log_entry
             }
-            low_priority_send_queue.put_nowait(json.dumps(jsonrpc))
+            send_queue_push(json.dumps(jsonrpc), SEND_PRIORITY_LOW)
             curr_log = log_entry
         except OSError:
           pass  # file could be deleted by log rotation
@@ -655,34 +691,6 @@ def log_handler(end_event: threading.Event) -> None:
 
     except Exception:
       cloudlog.exception("athena.log_handler.exception")
-
-
-def stat_handler(end_event: threading.Event) -> None:
-  STATS_DIR = Paths.stats_root()
-  last_scan = 0.0
-
-  while not end_event.is_set():
-    curr_scan = time.monotonic()
-    try:
-      if curr_scan - last_scan > 10:
-        stat_filenames = list(filter(lambda name: not name.startswith(tempfile.gettempprefix()), os.listdir(STATS_DIR)))
-        if len(stat_filenames) > 0:
-          stat_path = os.path.join(STATS_DIR, stat_filenames[0])
-          with open(stat_path) as f:
-            jsonrpc = {
-              "method": "storeStats",
-              "params": {
-                "stats": f.read()
-              },
-              "jsonrpc": "2.0",
-              "id": stat_filenames[0]
-            }
-            low_priority_send_queue.put_nowait(json.dumps(jsonrpc))
-          os.remove(stat_path)
-        last_scan = curr_scan
-    except Exception:
-      cloudlog.exception("athena.stat_handler.exception")
-    time.sleep(0.1)
 
 
 def ws_proxy_recv(ws: WebSocket, local_sock: socket.socket, ssock: socket.socket, end_event: threading.Event, global_end_event: threading.Event) -> None:
@@ -745,7 +753,7 @@ def ws_recv(ws: WebSocket, end_event: threading.Event) -> None:
         recv_queue.put_nowait(data)
       elif opcode == ABNF.OPCODE_PING:
         last_ping = int(time.monotonic() * 1e9)
-        Params().put("LastAthenaPingTime", last_ping)
+        Params().put("LastAthenaPingTime", last_ping, block=True)
     except WebSocketTimeoutException:
       ns_since_last_ping = int(time.monotonic() * 1e9) - last_ping
       if ns_since_last_ping > RECONNECT_TIMEOUT_S * 1e9:
@@ -759,10 +767,7 @@ def ws_recv(ws: WebSocket, end_event: threading.Event) -> None:
 def ws_send(ws: WebSocket, end_event: threading.Event) -> None:
   while not end_event.is_set():
     try:
-      try:
-        data = send_queue.get_nowait()
-      except queue.Empty:
-        data = low_priority_send_queue.get(timeout=1)
+      _, _, data = send_queue.get(timeout=1)
       for i in range(0, len(data), WS_FRAME_SIZE):
         frame = data[i:i+WS_FRAME_SIZE]
         last = i + WS_FRAME_SIZE >= len(data)
@@ -781,7 +786,7 @@ def ws_manage(ws: WebSocket, end_event: threading.Event) -> None:
   sock = ws.sock
 
   while True:
-    onroad = params.get_bool("IsOnroad")
+    onroad = not params.get_bool("IsOffroad")
     if onroad != onroad_prev:
       onroad_prev = onroad
 

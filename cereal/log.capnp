@@ -818,7 +818,7 @@ struct ControlsState @0x97ff69c53601abf1 {
     debugState @59 :LateralDebugState;
     torqueState @60 :LateralTorqueState;
 
-    curvatureStateDEPRECATED @65 :Deprecated.LateralCurvatureState;
+    curvatureState @65 :LateralCurvatureState;
     lqrStateDEPRECATED @55 :Deprecated.LateralLQRState;
     indiStateDEPRECATED @52 :Deprecated.LateralINDIState;
   }
@@ -865,6 +865,18 @@ struct ControlsState @0x97ff69c53601abf1 {
     steeringAngleDeg @1 :Float32;
     output @2 :Float32;
     saturated @3 :Bool;
+  }
+
+  struct LateralCurvatureState @0xad9d8095c06f7c61 {
+    active @0 :Bool;
+    actualCurvature @1 :Float32;
+    desiredCurvature @2 :Float32;
+    error @3 :Float32;
+    p @4 :Float32;
+    i @5 :Float32;
+    f @6 :Float32;
+    output @7 :Float32;
+    saturated @8 :Bool;
   }
 
   deprecated :group {
@@ -1120,7 +1132,7 @@ struct EncodeIndex {
   }
 }
 
-struct AndroidLogEntry {
+struct OperatingSystemLogEntry {
   id @0 :UInt8;
   ts @1 :UInt64;
   priority @2 :UInt8;
@@ -2063,6 +2075,7 @@ struct DriverStateV2 {
     rightBlinkProb @8 :Float32;
     sunglassesProb @9 :Float32;
     phoneProb @13 :Float32;
+    sleepProb @14 :Float32;
 
     deprecated :group {
       notReadyProb @12 :List(Float32);
@@ -2246,6 +2259,7 @@ struct LiveDelayData {
   lateralDelayEstimateStd @5 :Float32;
   points @4 :List(Float32);
   calPerc @6 :Int8;
+  version @7 :Int32;
 
   enum Status {
     unestimated @0;
@@ -2503,7 +2517,7 @@ struct Event {
     rawAudioData @147 :AudioData;
 
     # systems stuff
-    androidLog @20 :AndroidLogEntry;
+    operatingSystemLog @20 :OperatingSystemLogEntry;
     managerState @78 :ManagerState;
     procLog @33 :ProcLog;
     clocks @35 :Clocks;

@@ -17,13 +17,12 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_HW
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
-from openpilot.system.hardware import HARDWARE, TICI, AGNOS, PC
+from openpilot.common.hardware import HARDWARE, TICI, PC
 from openpilot.system.loggerd.config import get_available_percent
-from openpilot.system.statsd import statlog
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
-from openpilot.system.version import terms_version, training_version
+from openpilot.common.version import terms_version, training_version
 from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -107,8 +106,6 @@ def hw_state_thread(end_event, hw_queue):
   count = 0
   prev_hw_state = None
 
-  modem_version = None
-
   while not end_event.is_set():
     # these are expensive calls. update every 10s
     if (count % int(10. / DT_HW)) == 0:
@@ -117,13 +114,6 @@ def hw_state_thread(end_event, hw_queue):
         modem_temps = HARDWARE.get_modem_temperatures()
         if len(modem_temps) == 0 and prev_hw_state is not None:
           modem_temps = prev_hw_state.modem_temps
-
-        # Log modem version once
-        if AGNOS and (modem_version is None):
-          modem_version = HARDWARE.get_modem_version()
-
-          if modem_version is not None:
-            cloudlog.event("modem version", version=modem_version)
 
         tx, rx = HARDWARE.get_modem_data_usage()
 
@@ -206,7 +196,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # handle requests to cycle system started state
     if params.get_bool("OnroadCycleRequested"):
-      params.put_bool("OnroadCycleRequested", False)
+      params.put_bool("OnroadCycleRequested", False, block=True)
       offroad_cycle_count = sm.frame
     onroad_conditions["not_onroad_cycle"] = (sm.frame - offroad_cycle_count) >= ONROAD_CYCLE_TIME * SERVICE_LIST['pandaStates'].frequency
 
@@ -324,13 +314,13 @@ def hardware_thread(end_event, hw_queue) -> None:
       should_start = should_start and all(startup_conditions.values())
 
     if should_start != should_start_prev or (count == 0):
-      params.put_bool("IsEngaged", False)
+      params.put_bool("IsEngaged", False, block=True)
       engaged_prev = False
 
     if sm.updated['selfdriveState']:
       engaged = sm['selfdriveState'].enabled
       if engaged != engaged_prev:
-        params.put_bool("IsEngaged", engaged)
+        params.put_bool("IsEngaged", engaged, block=True)
         engaged_prev = engaged
 
       try:
@@ -370,17 +360,15 @@ def hardware_thread(end_event, hw_queue) -> None:
     msg.deviceState.offroadPowerUsageUwh = power_monitor.get_power_used()
     msg.deviceState.carBatteryCapacityUwh = max(0, power_monitor.get_car_battery_capacity())
     current_power_draw = HARDWARE.get_current_power_draw()
-    statlog.sample("power_draw", current_power_draw)
     msg.deviceState.powerDrawW = current_power_draw
 
     som_power_draw = HARDWARE.get_som_power_draw()
-    statlog.sample("som_power_draw", som_power_draw)
     msg.deviceState.somPowerDrawW = som_power_draw
 
     # Check if we need to shut down
     if power_monitor.should_shutdown(onroad_conditions["ignition"], in_car, off_ts, started_seen):
       cloudlog.warning(f"shutting device down, offroad since {off_ts}")
-      params.put_bool("DoShutdown", True)
+      params.put_bool("DoShutdown", True, block=True)
 
     msg.deviceState.started = started_ts is not None
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))
@@ -391,24 +379,6 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     msg.deviceState.thermalStatus = thermal_status
     pm.send("deviceState", msg)
-
-    # Log to statsd
-    statlog.gauge("free_space_percent", msg.deviceState.freeSpacePercent)
-    statlog.gauge("gpu_usage_percent", msg.deviceState.gpuUsagePercent)
-    statlog.gauge("memory_usage_percent", msg.deviceState.memoryUsagePercent)
-    for i, usage in enumerate(msg.deviceState.cpuUsagePercent):
-      statlog.gauge(f"cpu{i}_usage_percent", usage)
-    for i, temp in enumerate(msg.deviceState.cpuTempC):
-      statlog.gauge(f"cpu{i}_temperature", temp)
-    for i, temp in enumerate(msg.deviceState.gpuTempC):
-      statlog.gauge(f"gpu{i}_temperature", temp)
-    statlog.gauge("memory_temperature", msg.deviceState.memoryTempC)
-    for i, temp in enumerate(msg.deviceState.pmicTempC):
-      statlog.gauge(f"pmic{i}_temperature", temp)
-    for i, temp in enumerate(last_hw_state.modem_temps):
-      statlog.gauge(f"modem_temperature{i}", temp)
-    statlog.gauge("fan_speed_percent_desired", msg.deviceState.fanSpeedPercentDesired)
-    statlog.gauge("screen_brightness_percent", msg.deviceState.screenBrightnessPercent)
 
     # report to server once every 10 minutes, or every 1s when thermally blocked
     rising_edge_started = should_start and not should_start_prev
@@ -426,11 +396,11 @@ def hardware_thread(end_event, hw_queue) -> None:
       # save last one before going onroad
       if rising_edge_started:
         try:
-          params.put("LastOffroadStatusPacket", dat)
+          params.put("LastOffroadStatusPacket", dat, block=True)
         except Exception:
           cloudlog.exception("failed to save offroad status")
 
-    params.put_bool_nonblocking("NetworkMetered", msg.deviceState.networkMetered)
+    params.put_bool("NetworkMetered", msg.deviceState.networkMetered)
 
     now_ts = time.monotonic()
     if off_ts:
@@ -440,8 +410,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     last_uptime_ts = now_ts
 
     if (count % int(60. / DT_HW)) == 0:
-      params.put("UptimeOffroad", uptime_offroad)
-      params.put("UptimeOnroad", uptime_onroad)
+      params.put("UptimeOffroad", uptime_offroad, block=True)
+      params.put("UptimeOnroad", uptime_onroad, block=True)
 
     count += 1
     should_start_prev = should_start
