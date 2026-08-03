@@ -75,7 +75,6 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     driverUnresponsive2 @37;
     driverUnresponsive3 @38;
     belowSteerSpeed @39;
-    lowBattery @40;
     accFaulted @41;
     sensorDataInvalid @42;
     commIssue @43;
@@ -107,18 +106,17 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     noGps @68;
     wrongCruiseMode @69;
     modeldLagging @70;
-    deviceFalling @71;
     fanMalfunction @72;
     cameraMalfunction @73;
     cameraFrameRate @74;
     processNotRunning @75;
     dashcamMode @76;
     selfdriveInitializing @77;
-    usbError @78;
     cruiseMismatch @79;
     canBusMissing @80;
     selfdrivedLagging @81;
     resumeBlocked @82;
+    carNotReady @103;
     steerTimeLimit @83;
     vehicleSensorsInvalid @84;
     locationdTemporaryError @85;
@@ -131,9 +129,15 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     aeb @92;
     userBookmark @95;
     excessiveActuation @96;
-    audioFeedback @97;
+    bigModelLoading @100;
+    bigModelFailed @102;
 
+    lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;
+    deviceFallingDEPRECATED @71;
+    usbErrorDEPRECATED @78;
+    audioFeedbackDEPRECATED @97;
+    bigModelReadyDEPRECATED @101;
   }
 }
 
@@ -812,6 +816,7 @@ struct SelfdriveState {
     promptDistracted @8;
 
     preAlert @9;
+    complete @10;
   }
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {
@@ -2160,7 +2165,8 @@ struct DriverMonitoringStateDEPRECATED @0xb83cda094a1da284 {
 
 struct DriverMonitoringState {
   lockout @0 :Bool;
-  lockoutRecoveryPercent @11 :Int8;
+  lockoutCount @15 :Int8;
+  lockoutMinutesRemaining @11 :Int8;
   alert3Count @12 :Int8;
   noResponseCount @13 :Int8;
   noResponseForceDecel @14 :Bool;
@@ -2483,11 +2489,6 @@ struct AudioData {
   sampleRate @1 :UInt32;
 }
 
-struct AudioFeedback {
-  audio @0 :AudioData;
-  blockNum @1 :UInt16;
-}
-
 struct Touch {
   sec @0 :Int64;
   usec @1 :Int64;
@@ -2581,7 +2582,6 @@ struct Event {
     # driving feedback
     userBookmark @93 :UserBookmark;
     bookmarkButton @148 :UserBookmark;
-    audioFeedback @149 :AudioFeedback;
 
     lateralManeuverPlan @150 :LateralManeuverPlan;
 
@@ -2631,6 +2631,7 @@ struct Event {
 
     # *********** legacy + deprecated ***********
     model @9 :Deprecated.ModelData; # TODO: rename modelV2 and mark this as deprecated
+    audioFeedbackDEPRECATED @149 :Deprecated.AudioFeedbackDEPRECATED;
     liveMpcDEPRECATED @36 :Deprecated.LiveMpcData;
     liveLongitudinalMpcDEPRECATED @37 :Deprecated.LiveLongitudinalMpcData;
     liveLocationKalmanDeprecatedDEPRECATED @51 :Deprecated.LiveLocationData;
