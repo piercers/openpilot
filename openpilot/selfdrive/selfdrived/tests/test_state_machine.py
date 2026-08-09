@@ -7,7 +7,7 @@ from openpilot.selfdrive.selfdrived.events import Events, ET, EVENTS, NormalPerm
 State = log.SelfdriveState.OpenpilotState
 
 # The event types that maintain the current state
-MAINTAIN_STATES = {State.enabled: (None,), State.disabled: (None,), State.softDisabling: (ET.SOFT_DISABLE,),
+MAINTAIN_STATES = {State.enabled: (None,), State.lateralEnabled: (None,), State.disabled: (None,), State.softDisabling: (ET.SOFT_DISABLE,),
                    State.preEnabled: (ET.PRE_ENABLE,), State.overriding: (ET.OVERRIDE_LATERAL, ET.OVERRIDE_LONGITUDINAL)}
 ALL_STATES = tuple(State.schema.enumerants.values())
 # The event types checked in DISABLED section of state machine
@@ -91,3 +91,9 @@ class TestStateMachine(OpenpilotTestCase):
         self.state_machine.update(self.events)
         assert self.state_machine.state == state
         self.events.clear()
+
+  def test_lateral_only_state(self):
+    self.events.add(make_event([ET.ENABLE]))
+    enabled, active = self.state_machine.update(self.events, lateral_only=True)
+    assert self.state_machine.state == State.lateralEnabled
+    assert enabled and active

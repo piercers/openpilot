@@ -7,6 +7,7 @@ import openpilot.cereal.messaging as messaging
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
+from opendbc.safety import ALTERNATIVE_EXPERIENCE
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient
 
@@ -101,6 +102,8 @@ class SelfdriveD:
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+    self.subaru_lateral_on_brake = bool(self.CP.alternativeExperience & ALTERNATIVE_EXPERIENCE.ENABLE_MADS)
+    self.lateral_only = False
 
     car_recognized = self.CP.brand != 'mock'
 
@@ -238,15 +241,24 @@ class SelfdriveD:
       car_events = self.car_events.update(CS, self.CS_prev, self.sm['carControl']).to_msg()
       self.events.add_from_msg(car_events)
 
+      if self.subaru_lateral_on_brake and CS.cruiseState.available:
+        # ACC may disengage on brake while the physical EyeSight Main switch
+        # remains on. Preserve the lateral state; Panda independently verifies
+        # that same Main signal before accepting steering commands.
+        self.events.remove(EventName.pcmDisable)
+        self.events.remove(EventName.buttonCancel)
+        self.events.remove(EventName.pedalPressed)
+
       if self.CP.notCar:
         # wait for everything to init first
         if self.sm.frame > int(2. / DT_CTRL) and self.initialized:
           # body always wants to enable
           self.events.add(EventName.pcmEnable)
 
-      # Disable on rising edge of accelerator or brake. Also disable on brake when speed > 0
+      # Brake exits longitudinal control. On the explicitly enabled Forester
+      # experiment, EyeSight Main keeps lateral control authorized.
       if (CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator) or \
-        (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
+        ((CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) and not self.subaru_lateral_on_brake) or \
         (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill)):
         self.events.add(EventName.pedalPressed)
 
@@ -494,8 +506,8 @@ class SelfdriveD:
     if not self.enabled:
       self.mismatch_counter = 0
 
-    # All pandas not in silent mode must have controlsAllowed when openpilot is enabled
-    if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
+    # Lateral-only Forester control is separately authorized by Panda safety.
+    if self.enabled and any(not (ps.controlsAllowedLateral if self.lateral_only else ps.controlsAllowed) for ps in self.sm['pandaStates']
            if ps.safetyModel not in IGNORED_SAFETY_MODES):
       self.mismatch_counter += 1
 
@@ -546,9 +558,10 @@ class SelfdriveD:
 
   def step(self):
     CS = self.data_sample()
+    self.lateral_only = self.subaru_lateral_on_brake and CS.cruiseState.available and not CS.cruiseState.enabled
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
-      self.enabled, self.active = self.state_machine.update(self.events)
+      self.enabled, self.active = self.state_machine.update(self.events, lateral_only=self.lateral_only)
     self.update_alerts(CS)
 
     self.publish_selfdriveState(CS)

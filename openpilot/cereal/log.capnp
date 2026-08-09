@@ -569,7 +569,7 @@ struct PandaState @0xa7649e2575e4591e {
 
   # these fields are not used by openpilot, but they're
   # reserved for forks building alternate experiences.
-  controlsAllowedRESERVED1 @38 :Bool;
+  controlsAllowedLateral @38 :Bool;
   controlsAllowedRESERVED2 @39 :Bool;
 
   enum FaultStatus {
@@ -838,6 +838,7 @@ struct SelfdriveState {
     enabled @2;
     softDisabling @3;
     overriding @4;  # superset of overriding with steering or accelerator
+    lateralEnabled @5;  # Forester lateral control active without ACC
   }
 
   enum AlertStatus @0xa0d0dcd113193c62 {
