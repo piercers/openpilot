@@ -1,4 +1,5 @@
 from openpilot.common.params import Params
+from opendbc.car.subaru.values import SubaruFlags
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
@@ -23,6 +24,11 @@ DESCRIPTIONS = {
     "<b>WARNING: openpilot longitudinal control is in alpha for this car and may disable Automatic Emergency Braking (AEB).</b><br><br>" +
     "On this car, openpilot defaults to the car's built-in ACC instead of openpilot's longitudinal control. " +
     "Enable this to switch to openpilot longitudinal control. Enabling Experimental mode is recommended when enabling openpilot longitudinal control alpha. " +
+    "Changing this setting will restart openpilot if the car is powered on."
+  ),
+  'subaru_stop_and_go': tr_noop(
+    "Experimental Subaru stop-and-go support sends a brief throttle command when a stopped lead vehicle moves. " +
+    "It is intended for supported Subaru vehicles with an electronic parking brake. Use only after validating it in a controlled setting. " +
     "Changing this setting will restart openpilot if the car is powered on."
   ),
 }
@@ -82,6 +88,14 @@ class DeveloperLayout(Widget):
       enabled=lambda: not ui_state.engaged,
     )
 
+    self._subaru_stop_and_go_toggle = toggle_item(
+      lambda: tr("Subaru Stop and Go (Experimental)"),
+      description=lambda: tr(DESCRIPTIONS["subaru_stop_and_go"]),
+      initial_state=self._params.get_bool("SubaruStopAndGo"),
+      callback=self._on_subaru_stop_and_go,
+      enabled=ui_state.is_offroad,
+    )
+
     self._ui_debug_toggle = toggle_item(
       lambda: tr("UI Debug Mode"),
       description="",
@@ -98,6 +112,7 @@ class DeveloperLayout(Widget):
       self._long_maneuver_toggle,
       self._lat_maneuver_toggle,
       self._alpha_long_toggle,
+      self._subaru_stop_and_go_toggle,
       self._ui_debug_toggle,
     ], line_separator=True, spacing=0)
 
@@ -117,7 +132,8 @@ class DeveloperLayout(Widget):
 
     # Hide non-release toggles on release builds
     # TODO: we can do an onroad cycle, but alpha long toggle requires a deinit function to re-enable radar and not fault
-    for item in (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle):
+    for item in (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle,
+                 self._alpha_long_toggle, self._subaru_stop_and_go_toggle):
       item.set_visible(not self._is_release)
 
     # CP gating
@@ -129,6 +145,14 @@ class DeveloperLayout(Widget):
       else:
         self._alpha_long_toggle.set_visible(True)
 
+      subaru_stop_and_go_available = ui_state.CP.brand == "subaru" and not (
+        ui_state.CP.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.HYBRID)
+      )
+      self._subaru_stop_and_go_toggle.set_visible(subaru_stop_and_go_available and not self._is_release)
+      self._subaru_stop_and_go_toggle.action_item.set_enabled(subaru_stop_and_go_available and ui_state.is_offroad())
+      if not subaru_stop_and_go_available:
+        self._params.remove("SubaruStopAndGo")
+
       long_man_enabled = ui_state.has_longitudinal_control and ui_state.is_offroad()
       self._long_maneuver_toggle.action_item.set_enabled(long_man_enabled)
       self._lat_maneuver_toggle.action_item.set_enabled(ui_state.is_offroad())
@@ -136,6 +160,7 @@ class DeveloperLayout(Widget):
       self._long_maneuver_toggle.action_item.set_enabled(False)
       self._lat_maneuver_toggle.action_item.set_enabled(False)
       self._alpha_long_toggle.set_visible(False)
+      self._subaru_stop_and_go_toggle.set_visible(False)
 
     # TODO: make a param control list item so we don't need to manage internal state as much here
     # refresh toggles from params to mirror external changes
@@ -146,6 +171,7 @@ class DeveloperLayout(Widget):
       ("LongitudinalManeuverMode", self._long_maneuver_toggle),
       ("LateralManeuverMode", self._lat_maneuver_toggle),
       ("AlphaLongitudinalEnabled", self._alpha_long_toggle),
+      ("SubaruStopAndGo", self._subaru_stop_and_go_toggle),
       ("ShowDebugInfo", self._ui_debug_toggle),
     ):
       item.action_item.set_state(self._params.get_bool(key))
@@ -204,3 +230,19 @@ class DeveloperLayout(Widget):
       self._params.put_bool("AlphaLongitudinalEnabled", False, block=True)
       self._params.put_bool("OnroadCycleRequested", True, block=True)
       self._update_toggles()
+
+  def _on_subaru_stop_and_go(self, state: bool):
+    if state:
+      def confirm_callback(result: DialogResult):
+        if result == DialogResult.CONFIRM:
+          self._params.put_bool("SubaruStopAndGo", True, block=True)
+          self._params.put_bool("OnroadCycleRequested", True, block=True)
+        else:
+          self._subaru_stop_and_go_toggle.action_item.set_state(False)
+
+      content = (f"<h1>{self._subaru_stop_and_go_toggle.title}</h1><br>" +
+                 f"<p>{self._subaru_stop_and_go_toggle.description}</p>")
+      gui_app.push_widget(ConfirmDialog(content, tr("Enable"), rich=True, callback=confirm_callback))
+    else:
+      self._params.put_bool("SubaruStopAndGo", False, block=True)
+      self._params.put_bool("OnroadCycleRequested", True, block=True)
